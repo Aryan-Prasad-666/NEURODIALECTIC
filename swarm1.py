@@ -55,12 +55,16 @@ class RLAgent:
         """Generate state embedding from query and context vectors."""
         query_embedding = self.embedding_model.encode(query).tolist()
         context_mean = np.mean([v["vector"] for v in context_vectors], axis=0) if context_vectors else np.zeros(self.embedding_dim)
-        return (np.array(query_embedding) + context_mean).tolist()
+        state_embedding = (np.array(query_embedding) + context_mean).tolist()
+        print(f"RL State Embedding (first 5 dims): {state_embedding[:5]}")
+        return state_embedding
 
     def choose_action(self, state_embedding):
         """Select action using epsilon-greedy policy."""
         if np.random.random() < self.epsilon:
-            return np.random.choice(self.actions)
+            action = np.random.choice(self.actions)
+            print(f"RL Action (Random Exploration): {action}")
+            return action
         
         try:
             search_result = self.memory_manager.client.query_points(
@@ -75,10 +79,57 @@ class RLAgent:
                 action = point.payload.get("action")
                 if action in self.actions:
                     q_values[action] = point.payload.get("q_value", 0.0)
-            return max(q_values, key=q_values.get)
+            action = max(q_values, key=q_values.get)
+            print(f"RL Action (Greedy): {action}, Q-values: {q_values}")
+            return action
         except Exception as e:
             print(f"Warning: Failed to retrieve Q-values: {e}")
-            return np.random.choice(self.actions)
+            action = np.random.choice(self.actions)
+            print(f"RL Action (Fallback Random): {action}")
+            return action
+
+    def compute_reward(self, critique_vector, validation_vector, response):
+        """Compute reward based on critique and validation vectors."""
+        try:
+            reward_details = {}
+            # Critique severity (closer to zero vector = fewer flaws)
+            critique_score = 0.0
+            if critique_vector is not None:
+                critique_norm = np.linalg.norm(critique_vector)
+                critique_score = max(0, 5 - critique_norm * 10)  # Scale to 0-5
+                reward_details["critique_score"] = critique_score
+                reward_details["critique_norm"] = critique_norm
+            else:
+                reward_details["critique_score"] = 0.0
+                reward_details["critique_norm"] = 0.0
+
+            # Validation coherence (closer to positive reference vector = better)
+            positive_ref = self.embedding_model.encode("accurate coherent complete").tolist()
+            coherence_score = 0.0
+            if validation_vector is not None:
+                validation_sim = 1 - cosine(validation_vector, positive_ref)
+                coherence_score = validation_sim * 5  # Scale to 0-5
+                reward_details["coherence_score"] = coherence_score
+                reward_details["validation_similarity"] = validation_sim
+            else:
+                reward_details["coherence_score"] = 0.0
+                reward_details["validation_similarity"] = 0.0
+
+            # Length penalty
+            word_count = len(response.split())
+            length_penalty = -2 if word_count > 250 else 0
+            reward_details["length_penalty"] = length_penalty
+            reward_details["word_count"] = word_count
+
+            total_reward = critique_score + coherence_score + length_penalty
+            reward_details["total_reward"] = total_reward
+            print(f"RL Reward: {total_reward}, Details: {reward_details}")
+            return total_reward, reward_details
+        except Exception as e:
+            print(f"Warning: Failed to compute reward: {e}")
+            reward_details = {"total_reward": 0.0, "error": str(e)}
+            print(f"RL Reward: 0.0, Details: {reward_details}")
+            return 0.0, reward_details
 
     def update_q_table(self, state_embedding, action, reward, next_state_embedding):
         """Update Q-table with new experience."""
@@ -106,6 +157,7 @@ class RLAgent:
             max_next_q = max(next_q_values) if next_q_values else 0.0
 
             new_q = current_q + self.lr * (reward + self.gamma * max_next_q - current_q)
+            print(f"RL Q-Table Update: Action={action}, Old Q={current_q}, New Q={new_q}, Reward={reward}")
 
             point_id = str(uuid.uuid4())
             self.memory_manager.client.upsert(
@@ -120,27 +172,6 @@ class RLAgent:
             )
         except Exception as e:
             print(f"Warning: Failed to update Q-table: {e}")
-
-    def compute_reward(self, critique_vector, validation_vector, response):
-        """Compute reward based on critique and validation vectors."""
-        try:
-            # Heuristic: Critique severity (closer to zero vector = fewer flaws)
-            critique_norm = np.linalg.norm(critique_vector) if critique_vector is not None else 0.0
-            critique_score = max(0, 5 - critique_norm * 10)  # Scale to 0-5
-
-            # Validation coherence (closer to positive reference vector = better)
-            positive_ref = self.embedding_model.encode("accurate coherent complete").tolist()
-            validation_sim = 1 - cosine(validation_vector, positive_ref) if validation_vector is not None else 0.0
-            coherence_score = validation_sim * 5  # Scale to 0-5
-
-            # Length penalty
-            word_count = len(response.split())
-            length_penalty = -2 if word_count > 250 else 0
-
-            return critique_score + coherence_score + length_penalty
-        except Exception as e:
-            print(f"Warning: Failed to compute reward: {e}")
-            return 0.0
 
 # Memory Manager with Qdrant for semantic, episodic, and agent communication
 class MemoryManager:
@@ -191,6 +222,7 @@ class MemoryManager:
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "relevance_score": 1.0
             }
+            print(f"Storing Semantic Vector (first 5 dims): {embedding[:5]}, Content: {fact}")
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -217,6 +249,7 @@ class MemoryManager:
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "relevance_score": 1.0
             }
+            print(f"Storing Episodic Vector (first 5 dims): {embedding[:5]}, Content: {content[:100]}...")
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -244,6 +277,7 @@ class MemoryManager:
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "relevance_score": 1.0
             }
+            print(f"Storing Agent Communication Vector (first 5 dims): {vector[:5]}, Agent: {agent}, Content: {content[:100]}...")
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -269,6 +303,7 @@ class MemoryManager:
                 "next_state": next_state_embedding,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
             }
+            print(f"Storing RL Experience: Action={action}, Reward={reward}, State (first 5 dims): {state_embedding[:5]}")
             self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -287,6 +322,7 @@ class MemoryManager:
         context = {"semantic": [], "episodic": [], "agent_communication": []}
         try:
             query_embedding = self.embedding_model.encode(query).tolist()
+            print(f"Retrieving Context for Query: {query}, Query Vector (first 5 dims): {query_embedding[:5]}")
             search_result = self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_embedding,
@@ -324,6 +360,9 @@ class MemoryManager:
                         "query": payload.get("query", ""),
                         "similarity": similarity
                     })
+            print(f"Context Retrieved: {len(context['semantic'])} semantic, {len(context['episodic'])} episodic, {len(context['agent_communication'])} agent_communication")
+            for item in context["agent_communication"]:
+                print(f"Agent Communication Context: Agent={item['agent']}, Similarity={item['similarity']}, Content={item['content'][:100]}...")
         except Exception as e:
             print(f"Warning: Failed to retrieve context: {e}")
         
@@ -446,11 +485,14 @@ class QueryClassifier:
     def classify(self, query, context_vectors):
         cache_key = f"classify:{query}"
         if cache_key in response_cache:
+            print(f"Classifier Cache Hit: {query}")
             return response_cache[cache_key]
 
         if self.is_likely_non_debatable(query):
             content = f"Query contains non-debatable keywords: {query}. Assumed non-debatable."
             vector = self.embedding_model.encode(content).tolist()
+            print(f"Classifier Output: {content}")
+            print(f"Classifier Vector (first 5 dims): {vector[:5]}")
             result = {
                 "classification": "Non-debatable",
                 "vector": vector,
@@ -478,6 +520,8 @@ class QueryClassifier:
                 elif "debatable" in response_lower:
                     classification = "Debatable"
         vector = self.embedding_model.encode(content).tolist()
+        print(f"Classifier Output: {content}")
+        print(f"Classifier Vector (first 5 dims): {vector[:5]}")
         result = {
             "classification": classification,
             "vector": vector,
@@ -490,19 +534,18 @@ class QueryClassifier:
 class ConvergenceChecker:
     def __init__(self):
         self.prompt_template = PromptTemplate(
-            input_variables=["critique_vector", "round", "query"],
+            input_variables=["critique_content", "round", "query"],
             template=(
-                "Evaluate the critique vector for '{query}' in round {round}. "
+                "Evaluate the critique for '{query}' in round {round}. "
                 "Does it indicate convergence (minor suggestions) or require refinement? "
                 "Explain in 250 words or less and return 'Converged' or 'Continue' as the final word.\n"
-                "Critique: {critique_vector}"
+                "Critique: {critique_content}"
             )
         )
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    def check_convergence(self, critique_vector, round, query):
-        critique_str = "Critique vector received"  # Placeholder for vector interpretation
-        prompt = self.prompt_template.format(critique_vector=critique_str, round=round, query=query)
+    def check_convergence(self, critique_vector, critique_content, round, query):
+        prompt = self.prompt_template.format(critique_content=critique_content, round=round, query=query)
         response = api_call({"type": "gemini"}, prompt)
         decision = "Continue"
         content = response
@@ -520,6 +563,8 @@ class ConvergenceChecker:
                 elif "continue" in response_lower:
                     decision = "Continue"
         vector = self.embedding_model.encode(content).tolist()
+        print(f"Convergence Checker Output: {content}")
+        print(f"Convergence Checker Vector (first 5 dims): {vector[:5]}")
         return {
             "decision": decision,
             "vector": vector,
@@ -542,6 +587,7 @@ class Generator:
     def generate_response(self, query, context_vectors):
         cache_key = f"generate:{query}"
         if cache_key in response_cache:
+            print(f"Generator Cache Hit: {query}")
             return response_cache[cache_key]
 
         context = json.dumps([v["content"] for v in context_vectors], indent=2)
@@ -550,6 +596,8 @@ class Generator:
         openrouter_response = api_call({"type": "openrouter", "model": "meta-llama/llama-3.3-8b-instruct"}, prompt)
         content = f"Gemini: {gemini_response}\nOpenRouter (LLaMA): {openrouter_response}"
         vector = self.embedding_model.encode(content).tolist()
+        print(f"Generator Output: {content[:200]}...")
+        print(f"Generator Vector (first 5 dims): {vector[:5]}")
         result = {
             "gemini_response": gemini_response,
             "openrouter_response": openrouter_response,
@@ -581,6 +629,8 @@ class Critic:
         critique = api_call({"type": "cohere"}, prompt)
         content = f"Cohere Critique: {critique}"
         vector = self.embedding_model.encode(content).tolist()
+        print(f"Critic Output: {content[:200]}...")
+        print(f"Critic Vector (first 5 dims): {vector[:5]}")
         result = {
             "cohere_critique": critique,
             "vector": vector,
@@ -616,6 +666,8 @@ class Validator:
         
         content = f"OpenRouter (LLaMA): {openrouter_validation}\nCohere: {cohere_validation}"
         vector = self.embedding_model.encode(content).tolist()
+        print(f"Validator Output: {content[:200]}...")
+        print(f"Validator Vector (first 5 dims): {vector[:5]}")
         result = {
             "openrouter_validation": openrouter_validation,
             "cohere_validation": cohere_validation,
@@ -666,25 +718,41 @@ class Orchestrator:
         
         next_context = self.memory_manager.retrieve_context(query)
         next_state_embedding = self.rl_agent.get_state_embedding(query, next_context["agent_communication"])
-        reward = self.rl_agent.compute_reward(critique_vector, response_vector, response)
+        reward, reward_details = self.rl_agent.compute_reward(critique_vector, response_vector, response)
         self.rl_agent.update_q_table(state_embedding, action, reward, next_state_embedding)
-        self.memory_manager.store_rl_experience(state_embedding, action, reward, next_state_embedding)
+        self.rl_agent.memory_manager.store_rl_experience(state_embedding, action, reward, next_state_embedding)
         self.memory_manager.store_agent_communication(query, response_vector, "Orchestrator", response, ["synthesis"])
         
-        return response, response_vector
+        print(f"Synthesis Output: {response[:200]}...")
+        print(f"Synthesis Vector (first 5 dims): {response_vector[:5]}")
+        return response, response_vector, {
+            "action": action,
+            "reward_details": reward_details,
+            "state_embedding": state_embedding[:5],
+            "next_state_embedding": next_state_embedding[:5]
+        }
 
     def run_debate(self, query):
         reasoning_log = []
 
         context = self.memory_manager.retrieve_context(query)
         context_vectors = context["agent_communication"]
+        reasoning_log.append({
+            "step": "Context Retrieval",
+            "context": {
+                "semantic": context["semantic"],
+                "episodic": context["episodic"],
+                "agent_communication": [{"agent": v["agent"], "content": v["content"], "similarity": v["similarity"]} for v in context["agent_communication"]]
+            }
+        })
         
         # Step 0: Classify query
         classification_output = self.classifier.classify(query, context_vectors)
         reasoning_log.append({
             "step": "Query Classification",
             "classification": classification_output["classification"],
-            "content": classification_output["content"]
+            "content": classification_output["content"],
+            "vector": classification_output["vector"][:5]
         })
         self.memory_manager.store_agent_communication(
             query, classification_output["vector"], "Classifier", classification_output["content"], ["classification"]
@@ -706,14 +774,23 @@ class Orchestrator:
             answer_vector = self.embedding_model.encode(answer).tolist()
             next_context = self.memory_manager.retrieve_context(query)
             next_state_embedding = self.rl_agent.get_state_embedding(query, next_context["agent_communication"])
-            reward = self.rl_agent.compute_reward(None, answer_vector, answer)
+            reward, reward_details = self.rl_agent.compute_reward(None, answer_vector, answer)
             self.rl_agent.update_q_table(state_embedding, action, reward, next_state_embedding)
             self.memory_manager.store_rl_experience(state_embedding, action, reward, next_state_embedding)
             self.memory_manager.store_agent_communication(query, answer_vector, "Orchestrator", answer, ["non_debatable_response"])
             
+            print(f"Non-Debatable Answer: {answer[:200]}...")
+            print(f"Answer Vector (first 5 dims): {answer_vector[:5]}")
             reasoning_log.append({
                 "step": "Straightforward Answer",
-                "answer": answer
+                "answer": answer,
+                "vector": answer_vector[:5],
+                "rl_details": {
+                    "action": action,
+                    "reward_details": reward_details,
+                    "state_embedding": state_embedding[:5],
+                    "next_state_embedding": next_state_embedding[:5]
+                }
             })
             self.memory_manager.store_episodic(query, answer, ["non_debatable_response"])
             final_response = (
@@ -729,20 +806,28 @@ class Orchestrator:
         gen_output = self.generator.generate_response(query, context_vectors)
         current_response_vector = gen_output["vector"]
         current_response_content = gen_output["content"]
-        reasoning_log.append({"step": "Initial Generation", "content": current_response_content})
+        reasoning_log.append({
+            "step": "Initial Generation",
+            "content": current_response_content,
+            "vector": current_response_vector[:5]
+        })
 
         for round in range(self.max_rounds):
             critique_output = self.critic.critique_response(current_response_vector, current_response_content, query, context_vectors)
             reasoning_log.append({
                 "step": f"Critique Round {round + 1}",
-                "content": critique_output["content"]
+                "content": critique_output["content"],
+                "vector": critique_output["vector"][:5]
             })
 
-            convergence_output = self.convergence_checker.check_convergence(critique_output["vector"], round + 1, query)
+            convergence_output = self.convergence_checker.check_convergence(
+                critique_output["vector"], critique_output["content"], round + 1, query
+            )
             reasoning_log.append({
                 "step": f"Convergence Check Round {round + 1}",
                 "decision": convergence_output["decision"],
-                "content": convergence_output["content"]
+                "content": convergence_output["content"],
+                "vector": convergence_output["vector"][:5]
             })
             self.memory_manager.store_agent_communication(
                 query, convergence_output["vector"], "ConvergenceChecker", convergence_output["content"], ["convergence"]
@@ -751,18 +836,21 @@ class Orchestrator:
             if convergence_output["decision"] == "Converged":
                 break
 
-            current_response_content, current_response_vector = self.synthesize_response(
+            current_response_content, current_response_vector, synthesis_details = self.synthesize_response(
                 current_response_vector, current_response_content, critique_output["vector"], critique_output["content"], query, context_vectors
             )
             reasoning_log.append({
                 "step": f"Refined Response Round {round + 1}",
-                "content": current_response_content
+                "content": current_response_content,
+                "vector": current_response_vector[:5],
+                "rl_details": synthesis_details
             })
 
         validation_output = self.validator.validate_response(current_response_vector, current_response_content, query, context_vectors)
         reasoning_log.append({
             "step": "Final Validation",
-            "content": validation_output["content"]
+            "content": validation_output["content"],
+            "vector": validation_output["vector"][:5]
         })
 
         state_embedding = self.rl_agent.get_state_embedding(query, context_vectors)
@@ -787,12 +875,26 @@ class Orchestrator:
         selection_vector = self.embedding_model.encode(content).tolist()
         next_context = self.memory_manager.retrieve_context(query)
         next_state_embedding = self.rl_agent.get_state_embedding(query, next_context["agent_communication"])
-        reward = self.rl_agent.compute_reward(None, selection_vector, chosen_validation)
+        reward, reward_details = self.rl_agent.compute_reward(None, selection_vector, chosen_validation)
         self.rl_agent.update_q_table(state_embedding, action, reward, next_state_embedding)
         self.memory_manager.store_rl_experience(state_embedding, action, reward, next_state_embedding)
         self.memory_manager.store_agent_communication(query, selection_vector, "Orchestrator", content, ["final_response"])
         self.memory_manager.store_episodic(query, chosen_validation, ["final_response"])
         
+        print(f"Validation Selection Output: {content[:200]}...")
+        print(f"Selection Vector (first 5 dims): {selection_vector[:5]}")
+        reasoning_log.append({
+            "step": "Validation Selection",
+            "content": content,
+            "vector": selection_vector[:5],
+            "rl_details": {
+                "action": action,
+                "reward_details": reward_details,
+                "state_embedding": state_embedding[:5],
+                "next_state_embedding": next_state_embedding[:5]
+            }
+        })
+
         final_response = (
             f"Final Response: {chosen_validation}\n"
             f"Selection Reasoning: {content}"
