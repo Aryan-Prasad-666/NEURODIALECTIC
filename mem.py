@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import time
+import uuid
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from openai import OpenAI
@@ -10,6 +11,8 @@ from langchain.schema import HumanMessage, AIMessage
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from scipy.spatial.distance import cosine
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 # Load environment variables
 load_dotenv()
@@ -21,154 +24,195 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([OPENROUTER_KEY_1, COHERE_API_KEY, GEMINI_API_KEY]):
     raise ValueError("Missing one or more API keys in .env file")
 
-# Memory Manager with enhanced semantic and episodic memory
+# Memory Manager with Qdrant for semantic and episodic memory
 class MemoryManager:
     def __init__(self, clear_memory=False, max_memories=1000):
-        self.memory = ConversationBufferMemory(
-            memory_key="neurodialectic_memory",
-            output_key="response",
-            return_messages=True,
-            human_prefix="system"
-        )
-        self.memory_file = "C:/Users/Aryan Prasad/AppData/Local/neurodialectic/memory.json"
         self.max_memories = max_memories
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Lightweight embedding model
-        os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
-        if clear_memory and os.path.exists(self.memory_file):
-            os.remove(self.memory_file)
-        if os.path.exists(self.memory_file):
-            self._load_memory()
-
-    def _load_memory(self):
+        self.embedding_dim = 384  # Dimension of all-MiniLM-L6-v2 embeddings
+        self.collection_name = "neurodialectic_memory"
+        
+        # Initialize Qdrant client (in-memory for simplicity)
         try:
-            with open(self.memory_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                for entry in data.get("history", []):
-                    if entry["type"] == "human":
-                        self.memory.chat_memory.add_user_message(
-                            HumanMessage(content=entry["content"], additional_kwargs=entry["metadata"])
-                        )
-                    elif entry["type"] == "ai":
-                        self.memory.chat_memory.add_ai_message(
-                            AIMessage(content=entry["content"], additional_kwargs=entry["metadata"])
-                        )
+            self.client = QdrantClient(":memory:")  # In-memory instance for testing
+            # Alternative: self.client = QdrantClient(host="localhost", port=6333) for local server
+            self._initialize_collection(clear_memory)
         except Exception as e:
-            print(f"Warning: Failed to load memory file: {e}")
+            print(f"Warning: Failed to initialize Qdrant client: {e}")
+            raise ValueError("Qdrant initialization failed")
+
+    def _initialize_collection(self, clear_memory):
+        """Initialize or recreate the Qdrant collection."""
+        try:
+            # Check if collection exists
+            collections = self.client.get_collections()
+            if self.collection_name in [c.name for c in collections.collections]:
+                if clear_memory:
+                    self.client.delete_collection(self.collection_name)
+                    print(f"Cleared existing collection: {self.collection_name}")
+                else:
+                    return  # Use existing collection
+            
+            # Create new collection
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=self.embedding_dim,
+                    distance=models.Distance.COSINE
+                )
+            )
+            print(f"Created new collection: {self.collection_name}")
+        except Exception as e:
+            print(f"Warning: Failed to initialize collection: {e}")
+            raise
 
     def store_semantic(self, fact, source, tags):
-        metadata = {
-            "type": "semantic",
-            "source": source,
-            "tags": tags,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "relevance_score": 1.0  # Initial relevance
-        }
-        embedding = self.embedding_model.encode(fact).tolist()
-        metadata["embedding"] = embedding
-        self.memory.chat_memory.add_user_message(
-            HumanMessage(content=fact, additional_kwargs=metadata)
-        )
-        self._prune_memories()
-        self._save_memory()
+        """Store a semantic memory in Qdrant."""
+        try:
+            embedding = self.embedding_model.encode(fact).tolist()
+            point_id = str(uuid.uuid4())  # Unique ID for the point
+            payload = {
+                "type": "semantic",
+                "content": fact,
+                "source": source,
+                "tags": tags,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "relevance_score": 1.0
+            }
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    models.PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload=payload
+                    )
+                ]
+            )
+            self._prune_memories()
+        except Exception as e:
+            print(f"Warning: Failed to store semantic memory: {e}")
 
     def store_episodic(self, query, response, tags):
-        content = f"Query: {query}\nResponse: {response}"
-        metadata = {
-            "type": "episodic",
-            "tags": tags,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "relevance_score": 1.0
-        }
-        embedding = self.embedding_model.encode(content).tolist()
-        metadata["embedding"] = embedding
-        self.memory.chat_memory.add_user_message(
-            HumanMessage(content=content, additional_kwargs=metadata)
-        )
-        self._prune_memories()
-        self._save_memory()
+        """Store an episodic memory in Qdrant."""
+        try:
+            content = f"Query: {query}\nResponse: {response}"
+            embedding = self.embedding_model.encode(content).tolist()
+            point_id = str(uuid.uuid4())  # Unique ID for the point
+            payload = {
+                "type": "episodic",
+                "content": content,
+                "tags": tags,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "relevance_score": 1.0
+            }
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    models.PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload=payload
+                    )
+                ]
+            )
+            self._prune_memories()
+        except Exception as e:
+            print(f"Warning: Failed to store episodic memory: {e}")
 
     def retrieve_context(self, query, k=3):
+        """Retrieve relevant semantic and episodic memories from Qdrant."""
         context = {"semantic": [], "episodic": []}
-        query_embedding = self.embedding_model.encode(query)
-        messages = self.memory.chat_memory.messages[-100:]  # Increased limit for better coverage
-        relevant_memories = []
-
-        for msg in messages:
-            if isinstance(msg, HumanMessage) and "embedding" in msg.additional_kwargs:
-                msg_embedding = np.array(msg.additional_kwargs["embedding"])
-                similarity = 1 - cosine(query_embedding, msg_embedding)
-                if similarity > 0.5:  # Threshold for relevance
-                    relevant_memories.append({
-                        "content": msg.content,
-                        "metadata": msg.additional_kwargs,
+        try:
+            query_embedding = self.embedding_model.encode(query).tolist()
+            search_result = self.client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                limit=k,
+                score_threshold=0.5,  # Cosine similarity threshold
+                with_payload=True,
+                with_vectors=False
+            ).points
+            
+            for point in search_result:
+                payload = point.payload
+                mem_type = payload.get("type")
+                similarity = point.score  # Cosine similarity score
+                
+                if mem_type == "semantic":
+                    context["semantic"].append({
+                        "fact": payload["content"],
+                        "source": payload.get("source", ""),
+                        "tags": payload.get("tags", []),
                         "similarity": similarity
                     })
-
-        relevant_memories = sorted(
-            relevant_memories,
-            key=lambda x: (x["similarity"], x["metadata"].get("timestamp", "")),
-            reverse=True
-        )[:k]
-
-        for memory in relevant_memories:
-            mem_type = memory["metadata"].get("type")
-            if mem_type == "semantic":
-                context["semantic"].append({
-                    "fact": memory["content"],
-                    "source": memory["metadata"].get("source", ""),
-                    "tags": memory["metadata"].get("tags", []),
-                    "similarity": memory["similarity"]
-                })
-            elif mem_type == "episodic":
-                context["episodic"].append({
-                    "content": memory["content"],
-                    "timestamp": memory["metadata"].get("timestamp", ""),
-                    "tags": memory["metadata"].get("tags", []),
-                    "similarity": memory["similarity"]
-                })
-
+                elif mem_type == "episodic":
+                    context["episodic"].append({
+                        "content": payload["content"],
+                        "timestamp": payload.get("timestamp", ""),
+                        "tags": payload.get("tags", []),
+                        "similarity": similarity
+                    })
+        except Exception as e:
+            print(f"Warning: Failed to retrieve context: {e}")
+        
         return context
 
     def _prune_memories(self):
-        if len(self.memory.chat_memory.messages) > self.max_memories:
-            messages = self.memory.chat_memory.messages
-            # Sort by relevance score and timestamp, keep newest and most relevant
-            sorted_messages = sorted(
-                messages,
+        """Prune memories if exceeding max_memories."""
+        try:
+            # Get total number of points
+            count = self.client.count(collection_name=self.collection_name).count
+            if count <= self.max_memories:
+                return
+            
+            # Retrieve all points, sorted by relevance_score and timestamp
+            points = []
+            offset = None
+            while True:
+                scroll_result = self.client.scroll(
+                    collection_name=self.collection_name,
+                    limit=100,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                points.extend(scroll_result.points)
+                offset = scroll_result.next_page_offset
+                if offset is None:
+                    break
+            
+            # Sort by relevance_score and timestamp
+            sorted_points = sorted(
+                points,
                 key=lambda x: (
-                    x.additional_kwargs.get("relevance_score", 0.0),
-                    x.additional_kwargs.get("timestamp", "")
+                    x.payload.get("relevance_score", 0.0),
+                    x.payload.get("timestamp", "")
                 )
             )
-            self.memory.chat_memory.messages = sorted_messages[-self.max_memories:]
-            print(f"Pruned memory to {self.max_memories} entries.")
-
-    def _save_memory(self):
-        history = []
-        for msg in self.memory.chat_memory.messages:
-            entry = {
-                "type": "human" if isinstance(msg, HumanMessage) else "ai",
-                "content": msg.content,
-                "metadata": msg.additional_kwargs
-            }
-            history.append(entry)
-        try:
-            with open(self.memory_file, 'w', encoding='utf-8') as f:
-                json.dump({"history": history}, f, indent=2)
+            
+            # Delete excess points (oldest/least relevant)
+            points_to_delete = sorted_points[:count - self.max_memories]
+            point_ids = [point.id for point in points_to_delete]
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.PointIdsList(points=point_ids)
+            )
+            print(f"Pruned {len(point_ids)} memories to maintain {self.max_memories} entries.")
         except Exception as e:
-            print(f"Warning: Failed to save memory file: {e}")
+            print(f"Warning: Failed to prune memories: {e}")
 
 # In-memory cache for query responses and classifications
 response_cache = {}
 
 # Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
-    error_details = ""
+    error_details = []
     for attempt in range(retries):
         try:
             if config["type"] == "openrouter":
-                client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter bordered.ai/api/v1")
-                models = [config["model"], "mistral-7b-instruct:free"]
+                client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter.ai/api/v1")
+                models = ["meta-llama/llama-3.3-8b-instruct", "deepseek/deepseek-r1"]
                 for model in models:
                     try:
                         response = client.chat.completions.create(
@@ -179,13 +223,13 @@ def api_call(config, prompt, retries=3, timeout=10):
                         if not response.choices or len(response.choices) == 0:
                             raise ValueError("Empty choices in OpenRouter response")
                         text = response.choices[0].message.content
-                        words = text.split()[:50]  # Limit to 50 words
+                        words = text.split()[:250]  # Limit to 250 words
                         time.sleep(2)
                         return " ".join(words)
                     except Exception as e:
-                        error_details = f"Model {model} failed: {str(e)}"
+                        error_details.append(f"Model {model} failed: {str(e)}")
                         continue
-                raise ValueError(f"All OpenRouter models failed: {error_details}")
+                raise ValueError(f"All OpenRouter models failed: {', '.join(error_details)}")
             elif config["type"] == "gemini":
                 headers = {"Content-Type": "application/json"}
                 data = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -196,7 +240,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                 if not response.get("candidates") or not response["candidates"][0].get("content"):
                     raise ValueError("Empty content in Gemini response")
                 text = response["candidates"][0]["content"]["parts"][0]["text"]
-                words = text.split()[:50]  # Limit to 50 words
+                words = text.split()[:250]  # Limit to 250 words
                 return " ".join(words)
             elif config["type"] == "cohere":
                 headers = {"Authorization": f"Bearer {COHERE_API_KEY}", "Content-Type": "application/json"}
@@ -207,14 +251,14 @@ def api_call(config, prompt, retries=3, timeout=10):
                 if not response.get("text"):
                     raise ValueError("Empty text in Cohere response")
                 text = response["text"]
-                words = text.split()[:50]  # Limit to 50 words
+                words = text.split()[:250]  # Limit to 250 words
                 return " ".join(words)
         except Exception as e:
-            error_details = f"{config['type'].capitalize()} API failed - {str(e)}"
+            error_details.append(f"{config['type'].capitalize()} API failed - {str(e)}")
             if attempt == retries - 1:
-                return f"Error: {error_details}"[:50]  # Limit error to 50 words
+                return f"Error: {', '.join(error_details)}"[:250]  # Limit to 250 words
             time.sleep(2 ** attempt)
-    return f"Error: {config['type'].capitalize()} API failed after {retries} retries"[:50]
+    return f"Error: {', '.join(error_details)}"[:250]  # Limit to 250 words
 
 # Query Classifier
 class QueryClassifier:
@@ -222,7 +266,7 @@ class QueryClassifier:
         self.prompt_template = PromptTemplate(
             input_variables=["query"],
             template=(
-                "Is this query debatable or non-debatable? Explain in 50 words or less and return 'Debatable' or 'Non-debatable' as the final word.\nQuery: {query}"
+                "Is this query debatable or non-debatable? Explain in 250 words or less and return 'Debatable' or 'Non-debatable' as the final word.\nQuery: {query}"
             )
         )
         self.non_debatable_keywords = ["what is", "define", "calculate", "who is", "when is", "where is"]
@@ -273,7 +317,7 @@ class ConvergenceChecker:
         self.prompt_template = PromptTemplate(
             input_variables=["critiques", "round", "query"],
             template=(
-                "Evaluate these critiques for '{query}' in round {round} in 50 words or less: {critiques}\n"
+                "Evaluate these critiques for '{query}' in round {round} in 250 words or less: {critiques}\n"
                 "Do they indicate convergence or require refinement? Return 'Converged' or 'Continue' as the final word."
             )
         )
@@ -307,7 +351,7 @@ class Generator:
         self.memory_manager = memory_manager
         self.prompt_template = PromptTemplate(
             input_variables=["query", "context"],
-            template="Using the following context, provide a detailed and accurate answer to: {query} in 50 words or less.\nContext: {context}"
+            template="Using the following context, provide a detailed and accurate answer to: {query} in 250 words or less.\nContext: {context}"
         )
 
     def generate_response(self, query):
@@ -319,7 +363,7 @@ class Generator:
         context_str = json.dumps(context, indent=2)
         prompt = self.prompt_template.format(query=query, context=context_str)
         gemini_response = api_call({"type": "gemini"}, prompt)
-        openrouter_response = api_call({"type": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}, prompt)
+        openrouter_response = api_call({"type": "openrouter", "model": "meta-llama/llama-3.3-8b-instruct"}, prompt)
         result = {
             "gemini_response": gemini_response,
             "openrouter_response": openrouter_response,
@@ -336,7 +380,7 @@ class Critic:
         self.prompt_template = PromptTemplate(
             input_variables=["response", "query", "context"],
             template=(
-                "Using the following context, critique this response to '{query}' in 50 words or less: {response}\n"
+                "Using the following context, critique this response to '{query}' in 250 words or less: {response}\n"
                 "Context: {context}\n"
                 "Identify specific flaws (e.g., factual errors, missing arguments, verbosity) and suggest actionable improvements."
             )
@@ -361,7 +405,7 @@ class Validator:
         self.prompt_template = PromptTemplate(
             input_variables=["response", "query", "context"],
             template=(
-                "Using the following context, validate this response to '{query}' in 50 words or less: {response}\n"
+                "Using the following context, validate this response to '{query}' in 250 words or less: {response}\n"
                 "Context: {context}\n"
                 "Is it accurate, coherent, complete? Suggest final improvements."
             )
@@ -371,7 +415,7 @@ class Validator:
         context = self.memory_manager.retrieve_context(query)
         context_str = json.dumps(context, indent=2)
         prompt = self.prompt_template.format(response=response, query=query, context=context_str)
-        openrouter_validation = api_call({"type": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}, prompt)
+        openrouter_validation = api_call({"type": "openrouter", "model": "meta-llama/llama-3.3-8b-instruct"}, prompt)
         cohere_validation = api_call({"type": "cohere"}, prompt)
 
         if "Error:" in openrouter_validation:
@@ -381,7 +425,7 @@ class Validator:
         result = {
             "openrouter_validation": openrouter_validation,
             "cohere_validation": cohere_validation,
-            "combined": f"OpenRouter (LLaMA) Validation: {openrouter_validation}\nCohere Validation: {cohere_validation}"
+            "combined": f"OpenRouter (LLaMA): {openrouter_validation}\nCohere: {cohere_validation}"
         }
         self.memory_manager.store_episodic(query, result["combined"], ["validator_response"])
         return result
@@ -412,7 +456,7 @@ class Orchestrator:
         context = self.memory_manager.retrieve_context(query)
         context_str = json.dumps(context, indent=2)
         prompt = (
-            f"For the query '{query}', synthesize this response and critique into a concise response in 50 words or less:\n"
+            f"For the query '{query}', synthesize this response and critique into a concise response in 250 words or less:\n"
             f"Current Response: {current_response}\n"
             f"Critique: {critique}\n"
             f"Context: {context_str}\n"
@@ -433,7 +477,7 @@ class Orchestrator:
         if classification_output["classification"] == "Non-debatable":
             context = self.memory_manager.retrieve_context(query)
             context_str = json.dumps(context, indent=2)
-            prompt = f"Using the following context, provide a clear and concise answer to: {query} in 50 words or less.\nContext: {context_str}"
+            prompt = f"Using the following context, provide a clear and concise answer to: {query} in 250 words or less.\nContext: {context_str}"
             cache_key = f"non_debatable:{query}"
             if cache_key in response_cache:
                 answer = response_cache[cache_key]
@@ -494,7 +538,7 @@ class Orchestrator:
         })
 
         gemini_prompt = (
-            f"Evaluate these validations for the query '{query}' and select the better one in 50 words or less:\n"
+            f"Evaluate these validations for the query '{query}' and select the better one in 250 words or less:\n"
             f"Validation 1 (OpenRouter LLaMA): {validation_output['openrouter_validation']}\n"
             f"Validation 2 (Cohere): {validation_output['cohere_validation']}"
         )
@@ -530,20 +574,13 @@ if __name__ == "__main__":
     response_cache.clear()  # Clear cache at start
     orchestrator = Orchestrator(clear_memory=True)
     
-    while True:
-        query = input("Enter your debate query (or 'quit' to exit): ").strip()
-        if query.lower() == 'quit':
-            print("Exiting...")
-            break
-        if not query:
-            print("No query provided. Please enter a valid query.")
-            continue
-
+    query = input("Enter your debate query: ").strip()
+    if not query:
+        print("No query provided. Please enter a valid query.")
+    else:
         print(f"\nRunning debate for query: '{query}'...")
         result = orchestrator.run_debate(query)
-        
         print("\nFinal Response:", result["final_response"])
         print("\nReasoning Log:")
         for log in result["reasoning_log"]:
             print(json.dumps(log, indent=2))
-        print("\n" + "="*50 + "\n")
