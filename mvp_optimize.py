@@ -7,6 +7,11 @@ from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
 from openai import OpenAI
 import google.generativeai as genai
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -14,6 +19,18 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GROKCLOUD_API_KEY = os.getenv("GROKCLOUD_API_KEY")
+
+# Debug environment variables
+logger.debug(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'not set'}")
+logger.debug(f"OPENROUTER_KEY_1: {'set' if OPENROUTER_KEY_1 else 'not set'}")
+logger.debug(f"COHERE_API_KEY: {'set' if COHERE_API_KEY else 'not set'}")
+logger.debug(f"GROKCLOUD_API_KEY: {'set' if GROKCLOUD_API_KEY else 'not set'}")
+
+# Configure Google Generative AI with API key
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logger.error("GEMINI_API_KEY is not set in .env file")
 
 # In-memory cache for query responses and classifications
 response_cache = {}
@@ -25,7 +42,7 @@ def api_call(config, prompt, retries=3, timeout=10):
         try:
             if config["type"] == "openrouter":
                 client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter.ai/api/v1")
-                models = [config["model"], "mistral-7b-instruct:free"]  # Fallback model
+                models = [config["model"], "mistralai/mixtral-8x7b-instruct"]  # Updated fallback model
                 for model in models:
                     try:
                         response = client.chat.completions.create(
@@ -35,10 +52,18 @@ def api_call(config, prompt, retries=3, timeout=10):
                         )
                         if not response.choices or len(response.choices) == 0:
                             raise ValueError("Empty choices in OpenRouter response")
+                        text = response.choices[0].message.content
+                        words = text.split()
+                        if len(words) > 50:
+                            words = words[:50]
+                            text = " ".join(words) + "..."  # Add ellipsis for truncation
+                        else:
+                            text = " ".join(words)
                         time.sleep(2)  # Increased delay to avoid rate limits
-                        return response.choices[0].message.content
+                        return text
                     except Exception as e:
                         error_details = f"Model {model} failed: {str(e)}"
+                        logger.error(f"OpenRouter model {model} attempt {attempt + 1} failed: {str(e)}")
                         continue
                 raise ValueError(f"All OpenRouter models failed: {error_details}")
             elif config["type"] == "grokcloud":
@@ -55,7 +80,14 @@ def api_call(config, prompt, retries=3, timeout=10):
                 response = resp.json()
                 if not response.get("choices") or len(response["choices"]) == 0:
                     raise ValueError("Empty choices in GrokCloud response")
-                return response["choices"][0]["message"]["content"]
+                text = response["choices"][0]["message"]["content"]
+                words = text.split()
+                if len(words) > 50:
+                    words = words[:50]
+                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                else:
+                    text = " ".join(words)
+                return text
             elif config["type"] == "cohere":
                 headers = {
                     "Authorization": f"Bearer {COHERE_API_KEY}",
@@ -71,19 +103,38 @@ def api_call(config, prompt, retries=3, timeout=10):
                 response = resp.json()
                 if not response.get("text"):
                     raise ValueError("Empty text in Cohere response")
-                return response["text"]
+                text = response["text"]
+                words = text.split()
+                if len(words) > 50:
+                    words = words[:50]
+                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                else:
+                    text = " ".join(words)
+                return text
             elif config["type"] == "gemini":
+                if not GEMINI_API_KEY:
+                    raise ValueError("GEMINI_API_KEY is not set")
                 model_instance = genai.GenerativeModel(config["model"])
                 response = model_instance.generate_content(prompt)
                 if not response.text:
                     raise ValueError("Empty text in Gemini response")
-                return response.text
+                text = response.text
+                words = text.split()
+                if len(words) > 50:
+                    words = words[:50]
+                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                else:
+                    text = " ".join(words)
+                return text
         except Exception as e:
             error_details = f"{config['type'].capitalize()} API failed - {str(e)}. Response: {resp.text if 'resp' in locals() else 'No response'}"
+            logger.error(f"{config['type'].capitalize()} attempt {attempt + 1} failed: {str(e)}")
             if attempt == retries - 1:
-                return f"Error: {error_details}"
+                error_details_words = error_details.split()[:50]
+                return f"Error: {' '.join(error_details_words)}..."
             time.sleep(2 ** attempt)  # Exponential backoff
-    return f"Error: {config['type'].capitalize()} API failed after {retries} retries - {error_details}"
+    error_details_words = error_details.split()[:50]
+    return f"Error: {config['type'].capitalize()} API failed after {retries} retries - {' '.join(error_details_words)}..."
 
 # Query Classifier
 class QueryClassifier:
@@ -159,9 +210,9 @@ class ConvergenceChecker:
             reasoning = f"Convergence check failed: {response}. Defaulting to Continue."
         else:
             lines = response.strip().split('\n')
-            first_line = lines[0].strip()
-            if first_line in ["Converged", "Continue"]:
-                decision = first_line
+            last_line = lines[-1].strip() if lines else ""  # Use last line for decision
+            if last_line in ["Converged", "Continue"]:
+                decision = last_line
             else:
                 response_lower = response.lower()
                 if "converged" in response_lower:
@@ -189,11 +240,18 @@ class Generator:
         prompt = self.prompt_template.format(query=query)
         gemini_response = api_call({"type": "gemini", "model": "gemini-2.0-flash"}, prompt)
         openrouter_response = api_call({"type": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}, prompt)
-        result = {
-            "gemini_response": gemini_response,
-            "openrouter_response": openrouter_response,
-            "combined": f"Gemini: {gemini_response}\nOpenRouter (LLaMA): {openrouter_response}"
-        }
+        if "Error:" in gemini_response and "Error:" in openrouter_response:
+            result = {
+                "gemini_response": "Error: Gemini API failed",
+                "openrouter_response": "Error: OpenRouter API failed",
+                "combined": "Unable to generate response due to API errors. Please try again."
+            }
+        else:
+            result = {
+                "gemini_response": gemini_response,
+                "openrouter_response": openrouter_response,
+                "combined": f"Gemini: {gemini_response}\nOpenRouter (LLaMA): {openrouter_response}"
+            }
         response_cache[cache_key] = result
         return result
 
@@ -274,7 +332,7 @@ class Orchestrator:
             prompt = f"Provide a clear and concise answer to: {query}"
             cache_key = f"non_debatable:{query}"
             if cache_key in response_cache:
-                answer = response_cache[cache_key]
+                answer = response_cache[cache_key]  # Fixed: Use response_cache[cache_key]
             else:
                 answer = api_call({"type": "grokcloud"}, prompt)
                 response_cache[cache_key] = answer
@@ -340,7 +398,7 @@ class Orchestrator:
         grokcloud_response = api_call({"type": "grokcloud"}, grokcloud_prompt)
         reasoning_log.append({
             "step": "GrokCloud Selection",
-            "grokcloud_response": grokcloud_response
+            "grokcloud_response": grokcloud_response.strip()  # Ensure clean response
         })
 
         chosen_validation = validation_output["cohere_validation"]
