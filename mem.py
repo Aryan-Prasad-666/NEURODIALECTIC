@@ -7,6 +7,9 @@ from langchain.prompts import PromptTemplate
 from openai import OpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import HumanMessage, AIMessage
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from scipy.spatial.distance import cosine
 
 # Load environment variables
 load_dotenv()
@@ -18,9 +21,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not all([OPENROUTER_KEY_1, COHERE_API_KEY, GEMINI_API_KEY]):
     raise ValueError("Missing one or more API keys in .env file")
 
-# Memory Manager using LangChain
+# Memory Manager with enhanced semantic and episodic memory
 class MemoryManager:
-    def __init__(self, clear_memory=False):
+    def __init__(self, clear_memory=False, max_memories=1000):
         self.memory = ConversationBufferMemory(
             memory_key="neurodialectic_memory",
             output_key="response",
@@ -28,35 +31,44 @@ class MemoryManager:
             human_prefix="system"
         )
         self.memory_file = "C:/Users/Aryan Prasad/AppData/Local/neurodialectic/memory.json"
+        self.max_memories = max_memories
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Lightweight embedding model
         os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
         if clear_memory and os.path.exists(self.memory_file):
             os.remove(self.memory_file)
         if os.path.exists(self.memory_file):
-            try:
-                with open(self.memory_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for entry in data.get("history", []):
-                        if entry["type"] == "human":
-                            self.memory.chat_memory.add_user_message(
-                                HumanMessage(content=entry["content"], additional_kwargs=entry["metadata"])
-                            )
-                        elif entry["type"] == "ai":
-                            self.memory.chat_memory.add_ai_message(
-                                AIMessage(content=entry["content"], additional_kwargs=entry["metadata"])
-                            )
-            except Exception as e:
-                print(f"Warning: Failed to load memory file: {e}")
+            self._load_memory()
+
+    def _load_memory(self):
+        try:
+            with open(self.memory_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for entry in data.get("history", []):
+                    if entry["type"] == "human":
+                        self.memory.chat_memory.add_user_message(
+                            HumanMessage(content=entry["content"], additional_kwargs=entry["metadata"])
+                        )
+                    elif entry["type"] == "ai":
+                        self.memory.chat_memory.add_ai_message(
+                            AIMessage(content=entry["content"], additional_kwargs=entry["metadata"])
+                        )
+        except Exception as e:
+            print(f"Warning: Failed to load memory file: {e}")
 
     def store_semantic(self, fact, source, tags):
         metadata = {
             "type": "semantic",
             "source": source,
             "tags": tags,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "relevance_score": 1.0  # Initial relevance
         }
+        embedding = self.embedding_model.encode(fact).tolist()
+        metadata["embedding"] = embedding
         self.memory.chat_memory.add_user_message(
             HumanMessage(content=fact, additional_kwargs=metadata)
         )
+        self._prune_memories()
         self._save_memory()
 
     def store_episodic(self, query, response, tags):
@@ -64,66 +76,82 @@ class MemoryManager:
         metadata = {
             "type": "episodic",
             "tags": tags,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "relevance_score": 1.0
         }
+        embedding = self.embedding_model.encode(content).tolist()
+        metadata["embedding"] = embedding
         self.memory.chat_memory.add_user_message(
             HumanMessage(content=content, additional_kwargs=metadata)
         )
+        self._prune_memories()
         self._save_memory()
 
     def retrieve_context(self, query, k=3):
         context = {"semantic": [], "episodic": []}
-        messages = self.memory.chat_memory.messages[-50:]
+        query_embedding = self.embedding_model.encode(query)
+        messages = self.memory.chat_memory.messages[-100:]  # Increased limit for better coverage
         relevant_memories = []
-        
-        query_lower = query.lower()
+
         for msg in messages:
-            if isinstance(msg, HumanMessage):
-                content = msg.content.lower()
-                if any(word in content for word in query_lower.split()):
+            if isinstance(msg, HumanMessage) and "embedding" in msg.additional_kwargs:
+                msg_embedding = np.array(msg.additional_kwargs["embedding"])
+                similarity = 1 - cosine(query_embedding, msg_embedding)
+                if similarity > 0.5:  # Threshold for relevance
                     relevant_memories.append({
                         "content": msg.content,
-                        "metadata": msg.additional_kwargs
+                        "metadata": msg.additional_kwargs,
+                        "similarity": similarity
                     })
-        
+
         relevant_memories = sorted(
             relevant_memories,
-            key=lambda x: x["metadata"].get("timestamp", ""),
+            key=lambda x: (x["similarity"], x["metadata"].get("timestamp", "")),
             reverse=True
         )[:k]
-        
+
         for memory in relevant_memories:
             mem_type = memory["metadata"].get("type")
             if mem_type == "semantic":
                 context["semantic"].append({
                     "fact": memory["content"],
                     "source": memory["metadata"].get("source", ""),
-                    "tags": memory["metadata"].get("tags", [])
+                    "tags": memory["metadata"].get("tags", []),
+                    "similarity": memory["similarity"]
                 })
             elif mem_type == "episodic":
                 context["episodic"].append({
                     "content": memory["content"],
                     "timestamp": memory["metadata"].get("timestamp", ""),
-                    "tags": memory["metadata"].get("tags", [])
+                    "tags": memory["metadata"].get("tags", []),
+                    "similarity": memory["similarity"]
                 })
-        
+
         return context
+
+    def _prune_memories(self):
+        if len(self.memory.chat_memory.messages) > self.max_memories:
+            messages = self.memory.chat_memory.messages
+            # Sort by relevance score and timestamp, keep newest and most relevant
+            sorted_messages = sorted(
+                messages,
+                key=lambda x: (
+                    x.additional_kwargs.get("relevance_score", 0.0),
+                    x.additional_kwargs.get("timestamp", "")
+                )
+            )
+            self.memory.chat_memory.messages = sorted_messages[-self.max_memories:]
+            print(f"Pruned memory to {self.max_memories} entries.")
 
     def _save_memory(self):
         history = []
         for msg in self.memory.chat_memory.messages:
-            if isinstance(msg, HumanMessage):
-                history.append({
-                    "type": "human",
-                    "content": msg.content,
-                    "metadata": msg.additional_kwargs
-                })
-            elif isinstance(msg, AIMessage):
-                history.append({
-                    "type": "ai",
-                    "content": msg.content,
-                    "metadata": msg.additional_kwargs
-                })
+            entry = {
+                "type": "human" if isinstance(msg, HumanMessage) else "ai",
+                "content": msg.content,
+                "metadata": msg.additional_kwargs
+            }
+            history.append(entry)
         try:
             with open(self.memory_file, 'w', encoding='utf-8') as f:
                 json.dump({"history": history}, f, indent=2)
@@ -139,7 +167,7 @@ def api_call(config, prompt, retries=3, timeout=10):
     for attempt in range(retries):
         try:
             if config["type"] == "openrouter":
-                client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter.ai/api/v1")
+                client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter bordered.ai/api/v1")
                 models = [config["model"], "mistral-7b-instruct:free"]
                 for model in models:
                     try:
@@ -471,7 +499,6 @@ class Orchestrator:
             f"Validation 2 (Cohere): {validation_output['cohere_validation']}"
         )
         gemini_response = api_call({"type": "gemini"}, gemini_prompt)
-        # Ensure single append for Gemini Selection
         reasoning_log.append({
             "step": "Gemini Selection",
             "gemini_response": gemini_response
