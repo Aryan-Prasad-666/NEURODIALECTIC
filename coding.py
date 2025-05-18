@@ -8,17 +8,14 @@ from langchain.prompts import PromptTemplate
 from openai import OpenAI
 import google.generativeai as genai
 
-# Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GROKCLOUD_API_KEY = os.getenv("GROKCLOUD_API_KEY")
 
-# In-memory cache for code and decisions
 response_cache = {}
 
-# Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
     error_details = ""
     for attempt in range(retries):
@@ -35,7 +32,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                         )
                         if not response.choices or len(response.choices) == 0:
                             raise ValueError("Empty choices in OpenRouter response")
-                        time.sleep(2)  # Delay to avoid rate limits
+                        time.sleep(2)  
                         return response.choices[0].message.content
                     except Exception as e:
                         error_details = f"Model {model} failed: {str(e)}"
@@ -82,10 +79,9 @@ def api_call(config, prompt, retries=3, timeout=10):
             error_details = f"{config['type'].capitalize()} API failed - {str(e)}. Response: {resp.text if 'resp' in locals() else 'No response'}"
             if attempt == retries - 1:
                 return f"Error: {error_details}"
-            time.sleep(2 ** attempt)  # Exponential backoff
+            time.sleep(2 ** attempt) 
     return f"Error: {config['type'].capitalize()} API failed after {retries} retries - {error_details}"
 
-# Coder Agent
 class Coder:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -109,7 +105,6 @@ class Coder:
         response_cache[cache_key] = code
         return code
 
-# Reviewer Agent
 class Reviewer:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -129,7 +124,6 @@ class Reviewer:
             critique = api_call({"type": "openrouter", "model": "meta-llama/llama-3.1-8b-instruct:free"}, prompt)
         return critique
 
-# Manager Agent
 class Manager:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -157,7 +151,6 @@ class Manager:
         response_cache[cache_key] = decision
         return decision
 
-# Orchestrator
 class Orchestrator:
     def __init__(self):
         self.coder = Coder()
@@ -169,12 +162,11 @@ class Orchestrator:
         reasoning_log = []
         current_code = ""
         critique = ""
-        decision = None  # Initialize decision to avoid UnboundLocalError
+        decision = None 
         iteration = 0
 
         while iteration < self.max_iterations:
             iteration += 1
-            # Step 1: Generate or revise code
             current_code = self.coder.generate_code(task, critique)
             reasoning_log.append({
                 "step": f"Code Generation Iteration {iteration}",
@@ -188,7 +180,6 @@ class Orchestrator:
                 })
                 break
 
-            # Step 2: Review code
             critique = self.reviewer.review_code(current_code, task)
             reasoning_log.append({
                 "step": f"Review Iteration {iteration}",
@@ -202,7 +193,6 @@ class Orchestrator:
                 })
                 break
 
-            # Step 3: Manager decision
             decision = self.manager.decide(current_code, critique, task)
             reasoning_log.append({
                 "step": f"Decision Iteration {iteration}",
@@ -216,7 +206,6 @@ class Orchestrator:
                 })
                 break
 
-            # Check decision
             if "Accept" in decision.split()[-1]:
                 final_response = (
                     f"Final Code:\n{current_code}\n"
@@ -228,10 +217,8 @@ class Orchestrator:
                     "reasoning_log": reasoning_log
                 }
 
-            # Prepare for redo
             critique = f"Previous critique: {critique}\nManager decision: {decision}\nPlease address the issues and revise the code."
 
-        # Max iterations reached or error occurred
         final_response = (
             f"Final Code (Max Iterations Reached or Error):\n{current_code}\n"
             f"Manager Decision: Not Accepted\n"
@@ -243,7 +230,6 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
     orchestrator = Orchestrator()
     

@@ -14,21 +14,18 @@ from scipy.spatial.distance import cosine
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-# Load environment variables
 load_dotenv()
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Validate API keys
 if not all([OPENROUTER_KEY_1, COHERE_API_KEY, GEMINI_API_KEY]):
     raise ValueError("Missing one or more API keys in .env file")
 
-# RL Agent for optimizing API provider selection
 class RLAgent:
     def __init__(self, memory_manager, actions, learning_rate=0.1, discount_factor=0.9, epsilon=0.1):
         self.memory_manager = memory_manager
-        self.actions = actions  # ['openrouter', 'gemini', 'cohere']
+        self.actions = actions 
         self.lr = learning_rate
         self.gamma = discount_factor
         self.epsilon = epsilon
@@ -92,23 +89,21 @@ class RLAgent:
         """Compute reward based on critique and validation vectors."""
         try:
             reward_details = {}
-            # Critique severity (closer to zero vector = fewer flaws)
             critique_score = 0.0
             if critique_vector is not None:
                 critique_norm = np.linalg.norm(critique_vector)
-                critique_score = max(0, 5 - critique_norm * 10)  # Scale to 0-5
+                critique_score = max(0, 5 - critique_norm * 10)  
                 reward_details["critique_score"] = critique_score
                 reward_details["critique_norm"] = critique_norm
             else:
                 reward_details["critique_score"] = 0.0
                 reward_details["critique_norm"] = 0.0
 
-            # Validation coherence (closer to positive reference vector = better)
             positive_ref = self.embedding_model.encode("accurate coherent complete").tolist()
             coherence_score = 0.0
             if validation_vector is not None:
                 validation_sim = 1 - cosine(validation_vector, positive_ref)
-                coherence_score = validation_sim * 5  # Scale to 0-5
+                coherence_score = validation_sim * 5  
                 reward_details["coherence_score"] = coherence_score
                 reward_details["validation_similarity"] = validation_sim
             else:
@@ -173,7 +168,6 @@ class RLAgent:
         except Exception as e:
             print(f"Warning: Failed to update Q-table: {e}")
 
-# Memory Manager with Qdrant for semantic, episodic, and agent communication
 class MemoryManager:
     def __init__(self, clear_memory=False, max_memories=1000):
         self.max_memories = max_memories
@@ -407,10 +401,8 @@ class MemoryManager:
         except Exception as e:
             print(f"Warning: Failed to prune memories: {e}")
 
-# In-memory cache for query responses and classifications
 response_cache = {}
 
-# Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
     error_details = []
     for attempt in range(retries):
@@ -465,7 +457,6 @@ def api_call(config, prompt, retries=3, timeout=10):
             time.sleep(2 ** attempt)
     return f"Error: {', '.join(error_details)}"[:250]
 
-# Query Classifier
 class QueryClassifier:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -530,7 +521,6 @@ class QueryClassifier:
         response_cache[cache_key] = result
         return result
 
-# Convergence Checker
 class ConvergenceChecker:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -571,7 +561,6 @@ class ConvergenceChecker:
             "content": content
         }
 
-# Generator Agent
 class Generator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -609,7 +598,6 @@ class Generator:
         self.memory_manager.store_agent_communication(query, vector, "Generator", content, ["generator_response"])
         return result
 
-# Critic Agent
 class Critic:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -640,7 +628,6 @@ class Critic:
         self.memory_manager.store_agent_communication(query, vector, "Critic", content, ["critic_response"])
         return result
 
-# Validator Agent
 class Validator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -678,7 +665,6 @@ class Validator:
         self.memory_manager.store_agent_communication(query, vector, "Validator", content, ["validator_response"])
         return result
 
-# Orchestrator
 class Orchestrator:
     def __init__(self, clear_memory=False):
         self.memory_manager = MemoryManager(clear_memory=clear_memory)
@@ -746,7 +732,6 @@ class Orchestrator:
             }
         })
         
-        # Step 0: Classify query
         classification_output = self.classifier.classify(query, context_vectors)
         reasoning_log.append({
             "step": "Query Classification",
@@ -802,7 +787,6 @@ class Orchestrator:
                 "reasoning_log": reasoning_log
             }
 
-        # Debatable: Proceed with debate
         gen_output = self.generator.generate_response(query, context_vectors)
         current_response_vector = gen_output["vector"]
         current_response_content = gen_output["content"]
@@ -905,7 +889,6 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
     response_cache.clear()
     orchestrator = Orchestrator(clear_memory=True)

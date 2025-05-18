@@ -14,17 +14,14 @@ from scipy.spatial.distance import cosine
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-# Load environment variables
 load_dotenv()
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Validate API keys
 if not all([OPENROUTER_KEY_1, COHERE_API_KEY, GEMINI_API_KEY]):
     raise ValueError("Missing one or more API keys in .env file")
 
-# Memory Manager with Qdrant for semantic, episodic, and agent communication
 class MemoryManager:
     def __init__(self, clear_memory=False, max_memories=1000):
         self.max_memories = max_memories
@@ -224,10 +221,8 @@ class MemoryManager:
         except Exception as e:
             print(f"Warning: Failed to prune memories: {e}")
 
-# In-memory cache for query responses and classifications
 response_cache = {}
 
-# Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
     error_details = []
     for attempt in range(retries):
@@ -282,7 +277,6 @@ def api_call(config, prompt, retries=3, timeout=10):
             time.sleep(2 ** attempt)
     return f"Error: {', '.join(error_details)}"[:250]
 
-# Query Classifier
 class QueryClassifier:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -350,7 +344,6 @@ class QueryClassifier:
         response_cache[cache_key] = result
         return result
 
-# Convergence Checker
 class ConvergenceChecker:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -395,7 +388,6 @@ class ConvergenceChecker:
             "reasoning": reasoning
         }
 
-# Generator Agent
 class Generator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -432,7 +424,6 @@ class Generator:
         self.memory_manager.store_agent_communication(query, communication, "Generator", ["generator_response"])
         return result
 
-# Critic Agent
 class Critic:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -462,7 +453,6 @@ class Critic:
         self.memory_manager.store_agent_communication(query, communication, "Critic", ["critic_response"])
         return result
 
-# Validator Agent
 class Validator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -499,7 +489,6 @@ class Validator:
         self.memory_manager.store_agent_communication(query, communication, "Validator", ["validator_response"])
         return result
 
-# Orchestrator
 class Orchestrator:
     def __init__(self, clear_memory=False):
         self.memory_manager = MemoryManager(clear_memory=clear_memory)
@@ -544,7 +533,6 @@ class Orchestrator:
         reasoning_log = []
         scratchpad = ""
 
-        # Step 0: Classify query
         classification_output = self.classifier.classify(query)
         scratchpad += f"[Classifier] {classification_output['reasoning']}\n"
         reasoning_log.append({
@@ -589,7 +577,6 @@ class Orchestrator:
                 "reasoning_log": reasoning_log
             }
 
-        # Debatable: Proceed with debate
         gen_output = self.generator.generate_response(query)
         current_response = gen_output["combined"]
         scratchpad += f"[Generator] {current_response}\n"
@@ -679,7 +666,6 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
     response_cache.clear()
     orchestrator = Orchestrator(clear_memory=True)

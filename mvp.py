@@ -1,4 +1,3 @@
-# Explainable AI with Debating Sub-Agents using LangChain and Three Free APIs
 import os
 import json
 import requests
@@ -7,23 +6,19 @@ from langchain.prompts import PromptTemplate
 from openai import OpenAI
 import google.generativeai as genai
 
-# Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GROKCLOUD_API_KEY = os.getenv("GROKCLOUD_API_KEY")
 
-# Initialize OpenRouter client
 openrouter_client = OpenAI(
     api_key=OPENROUTER_KEY_1,
     base_url="https://openrouter.ai/api/v1"
 )
 
-# Gemini API setup
 genai.configure(api_key=GEMINI_API_KEY)
 
-# API query functions
 def query_openrouter(model_name, prompt):
     try:
         response = openrouter_client.chat.completions.create(
@@ -75,7 +70,6 @@ def query_gemini(prompt, model="gemini-2.0-flash"):
     except Exception as e:
         return f"Error: Gemini API failed - {str(e)}"
 
-# Generator Agent
 class Generator:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -93,7 +87,6 @@ class Generator:
             "combined": f"Gemini: {gemini_response}\nOpenRouter (LLaMA): {openrouter_response}"
         }
 
-# Critic Agent
 class Critic:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -111,7 +104,6 @@ class Critic:
             "combined": f"Gemini Critique: {gemini_critique}\nCohere Critique: {cohere_critique}"
         }
 
-# Validator Agent
 class Validator:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -129,46 +121,39 @@ class Validator:
             "combined": f"OpenRouter (LLaMA) Validation: {openrouter_validation}\nCohere Validation: {cohere_validation}"
         }
 
-# Orchestrator
 class Orchestrator:
     def __init__(self, default_debate_rounds=2):
         self.generator = Generator()
         self.critic = Critic()
         self.validator = Validator()
-        self.default_debate_rounds = max(1, int(default_debate_rounds))  # Ensure at least 1 round
+        self.default_debate_rounds = max(1, int(default_debate_rounds)) 
 
     def run_debate(self, query, debate_rounds=None):
-        # Use provided debate_rounds or fall back to default
         rounds = max(1, int(debate_rounds)) if debate_rounds is not None else self.default_debate_rounds
         reasoning_log = []
         
-        # Step 1: Generate initial response
         gen_output = self.generator.generate_response(query)
         current_response = gen_output["combined"]
         reasoning_log.append({"step": "Initial Generation", "response": current_response})
 
-        # Step 2: Debate loop (Critic refines response)
         for round in range(rounds):
             critique_output = self.critic.critique_response(current_response, query)
             reasoning_log.append({
                 "step": f"Critique Round {round + 1}",
                 "critique": critique_output["combined"]
             })
-            # Refine response (basic synthesis for demo)
             current_response = f"Refined: {current_response}\nCritique: {critique_output['combined']}"
             reasoning_log.append({
                 "step": f"Refined Response Round {round + 1}",
                 "response": current_response
             })
 
-        # Step 3: Validate final response
         validation_output = self.validator.validate_response(current_response, query)
         reasoning_log.append({
             "step": "Final Validation",
             "validation": validation_output["combined"]
         })
 
-        # Step 4: Select best validation with GrokCloud
         grokcloud_prompt = (
             f"Evaluate the following two validations for the query '{query}' and select the better one based on accuracy, coherence, and relevance. "
             f"Explain your reasoning and clearly state which validation is chosen.\n\n"
@@ -181,19 +166,16 @@ class Orchestrator:
             "grokcloud_response": grokcloud_response
         })
 
-        # Handle GrokCloud failure
         chosen_validation = validation_output["cohere_validation"]
         grokcloud_reasoning = grokcloud_response
         if "Error:" in grokcloud_response:
             grokcloud_reasoning = f"GrokCloud failed: {grokcloud_response}. Defaulting to Cohere validation."
         else:
-            # Extract chosen validation (basic parsing for demo)
             if "Validation 1" in grokcloud_response or "OpenRouter" in grokcloud_response:
                 chosen_validation = validation_output["openrouter_validation"]
             elif "Validation 2" in grokcloud_response or "Cohere" in grokcloud_response:
                 chosen_validation = validation_output["cohere_validation"]
 
-        # Construct final response
         final_response = (
             f"Final Response: {current_response}\n"
             f"Chosen Validation: {chosen_validation}\n"
@@ -205,12 +187,10 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
     orchestrator = Orchestrator(default_debate_rounds=2)
     
     while True:
-        # Prompt for query
         query = input("Enter your debate query (or 'quit' to exit): ").strip()
         if query.lower() == 'quit':
             print("Exiting...")
@@ -219,7 +199,6 @@ if __name__ == "__main__":
             query = "What is the best way to learn Python?"
             print(f"Using default query: {query}")
 
-        # Prompt for number of rounds
         rounds_input = input("Enter number of debate rounds (default is 2): ").strip()
         try:
             debate_rounds = int(rounds_input)
@@ -229,11 +208,9 @@ if __name__ == "__main__":
             debate_rounds = 2
             print(f"Invalid input, using default {debate_rounds} rounds")
 
-        # Run debate
         print(f"\nRunning debate for query: '{query}' with {debate_rounds} rounds...")
         result = orchestrator.run_debate(query, debate_rounds=debate_rounds)
         
-        # Display results
         print("\nFinal Response:", result["final_response"])
         print("\nReasoning Log:")
         for log in result["reasoning_log"]:

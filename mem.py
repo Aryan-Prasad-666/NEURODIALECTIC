@@ -14,28 +14,23 @@ from scipy.spatial.distance import cosine
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
-# Load environment variables
 load_dotenv()
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Validate API keys
 if not all([OPENROUTER_KEY_1, COHERE_API_KEY, GEMINI_API_KEY]):
     raise ValueError("Missing one or more API keys in .env file")
 
-# Memory Manager with Qdrant for semantic and episodic memory
 class MemoryManager:
     def __init__(self, clear_memory=False, max_memories=1000):
         self.max_memories = max_memories
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Lightweight embedding model
-        self.embedding_dim = 384  # Dimension of all-MiniLM-L6-v2 embeddings
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  
+        self.embedding_dim = 384 
         self.collection_name = "neurodialectic_memory"
         
-        # Initialize Qdrant client (in-memory for simplicity)
         try:
-            self.client = QdrantClient(":memory:")  # In-memory instance for testing
-            # Alternative: self.client = QdrantClient(host="localhost", port=6333) for local server
+            self.client = QdrantClient(":memory:")
             self._initialize_collection(clear_memory)
         except Exception as e:
             print(f"Warning: Failed to initialize Qdrant client: {e}")
@@ -44,16 +39,14 @@ class MemoryManager:
     def _initialize_collection(self, clear_memory):
         """Initialize or recreate the Qdrant collection."""
         try:
-            # Check if collection exists
             collections = self.client.get_collections()
             if self.collection_name in [c.name for c in collections.collections]:
                 if clear_memory:
                     self.client.delete_collection(self.collection_name)
                     print(f"Cleared existing collection: {self.collection_name}")
                 else:
-                    return  # Use existing collection
+                    return  
             
-            # Create new collection
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
@@ -70,7 +63,7 @@ class MemoryManager:
         """Store a semantic memory in Qdrant."""
         try:
             embedding = self.embedding_model.encode(fact).tolist()
-            point_id = str(uuid.uuid4())  # Unique ID for the point
+            point_id = str(uuid.uuid4()) 
             payload = {
                 "type": "semantic",
                 "content": fact,
@@ -98,7 +91,7 @@ class MemoryManager:
         try:
             content = f"Query: {query}\nResponse: {response}"
             embedding = self.embedding_model.encode(content).tolist()
-            point_id = str(uuid.uuid4())  # Unique ID for the point
+            point_id = str(uuid.uuid4())  
             payload = {
                 "type": "episodic",
                 "content": content,
@@ -129,7 +122,7 @@ class MemoryManager:
                 collection_name=self.collection_name,
                 query=query_embedding,
                 limit=k,
-                score_threshold=0.5,  # Cosine similarity threshold
+                score_threshold=0.5,  
                 with_payload=True,
                 with_vectors=False
             ).points
@@ -137,7 +130,7 @@ class MemoryManager:
             for point in search_result:
                 payload = point.payload
                 mem_type = payload.get("type")
-                similarity = point.score  # Cosine similarity score
+                similarity = point.score 
                 
                 if mem_type == "semantic":
                     context["semantic"].append({
@@ -161,12 +154,10 @@ class MemoryManager:
     def _prune_memories(self):
         """Prune memories if exceeding max_memories."""
         try:
-            # Get total number of points
             count = self.client.count(collection_name=self.collection_name).count
             if count <= self.max_memories:
                 return
             
-            # Retrieve all points, sorted by relevance_score and timestamp
             points = []
             offset = None
             while True:
@@ -182,7 +173,6 @@ class MemoryManager:
                 if offset is None:
                     break
             
-            # Sort by relevance_score and timestamp
             sorted_points = sorted(
                 points,
                 key=lambda x: (
@@ -191,7 +181,6 @@ class MemoryManager:
                 )
             )
             
-            # Delete excess points (oldest/least relevant)
             points_to_delete = sorted_points[:count - self.max_memories]
             point_ids = [point.id for point in points_to_delete]
             self.client.delete(
@@ -202,10 +191,8 @@ class MemoryManager:
         except Exception as e:
             print(f"Warning: Failed to prune memories: {e}")
 
-# In-memory cache for query responses and classifications
 response_cache = {}
 
-# Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
     error_details = []
     for attempt in range(retries):
@@ -223,7 +210,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                         if not response.choices or len(response.choices) == 0:
                             raise ValueError("Empty choices in OpenRouter response")
                         text = response.choices[0].message.content
-                        words = text.split()[:250]  # Limit to 250 words
+                        words = text.split()[:250] 
                         time.sleep(2)
                         return " ".join(words)
                     except Exception as e:
@@ -240,7 +227,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                 if not response.get("candidates") or not response["candidates"][0].get("content"):
                     raise ValueError("Empty content in Gemini response")
                 text = response["candidates"][0]["content"]["parts"][0]["text"]
-                words = text.split()[:250]  # Limit to 250 words
+                words = text.split()[:250] 
                 return " ".join(words)
             elif config["type"] == "cohere":
                 headers = {"Authorization": f"Bearer {COHERE_API_KEY}", "Content-Type": "application/json"}
@@ -251,16 +238,15 @@ def api_call(config, prompt, retries=3, timeout=10):
                 if not response.get("text"):
                     raise ValueError("Empty text in Cohere response")
                 text = response["text"]
-                words = text.split()[:250]  # Limit to 250 words
+                words = text.split()[:250]  
                 return " ".join(words)
         except Exception as e:
             error_details.append(f"{config['type'].capitalize()} API failed - {str(e)}")
             if attempt == retries - 1:
-                return f"Error: {', '.join(error_details)}"[:250]  # Limit to 250 words
+                return f"Error: {', '.join(error_details)}"[:250]  
             time.sleep(2 ** attempt)
-    return f"Error: {', '.join(error_details)}"[:250]  # Limit to 250 words
+    return f"Error: {', '.join(error_details)}"[:250] 
 
-# Query Classifier
 class QueryClassifier:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -311,7 +297,6 @@ class QueryClassifier:
         response_cache[cache_key] = result
         return result
 
-# Convergence Checker
 class ConvergenceChecker:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -345,7 +330,6 @@ class ConvergenceChecker:
             "reasoning": reasoning
         }
 
-# Generator Agent
 class Generator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -373,7 +357,6 @@ class Generator:
         self.memory_manager.store_episodic(query, result["combined"], ["generator_response"])
         return result
 
-# Critic Agent
 class Critic:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -398,7 +381,6 @@ class Critic:
         self.memory_manager.store_episodic(query, result["combined"], ["critic_response"])
         return result
 
-# Validator Agent
 class Validator:
     def __init__(self, memory_manager):
         self.memory_manager = memory_manager
@@ -430,7 +412,6 @@ class Validator:
         self.memory_manager.store_episodic(query, result["combined"], ["validator_response"])
         return result
 
-# Orchestrator
 class Orchestrator:
     def __init__(self, clear_memory=False):
         self.memory_manager = MemoryManager(clear_memory=clear_memory)
@@ -569,9 +550,8 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
-    response_cache.clear()  # Clear cache at start
+    response_cache.clear()  
     orchestrator = Orchestrator(clear_memory=True)
     
     query = input("Enter your debate query: ").strip()

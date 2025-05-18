@@ -1,4 +1,3 @@
-# Explainable AI with Debating Sub-Agents using LangChain and Three Free APIs
 import os
 import json
 import requests
@@ -9,40 +8,34 @@ from openai import OpenAI
 import google.generativeai as genai
 import logging
 
-# Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OPENROUTER_KEY_1 = os.getenv("OPENROUTER_KEY_1")
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
 GROKCLOUD_API_KEY = os.getenv("GROKCLOUD_API_KEY")
 
-# Debug environment variables
 logger.debug(f"GEMINI_API_KEY: {'set' if GEMINI_API_KEY else 'not set'}")
 logger.debug(f"OPENROUTER_KEY_1: {'set' if OPENROUTER_KEY_1 else 'not set'}")
 logger.debug(f"COHERE_API_KEY: {'set' if COHERE_API_KEY else 'not set'}")
 logger.debug(f"GROKCLOUD_API_KEY: {'set' if GROKCLOUD_API_KEY else 'not set'}")
 
-# Configure Google Generative AI with API key
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
     logger.error("GEMINI_API_KEY is not set in .env file")
 
-# In-memory cache for query responses and classifications
 response_cache = {}
 
-# Centralized API call wrapper
 def api_call(config, prompt, retries=3, timeout=10):
     error_details = ""
     for attempt in range(retries):
         try:
             if config["type"] == "openrouter":
                 client = OpenAI(api_key=OPENROUTER_KEY_1, base_url="https://openrouter.ai/api/v1")
-                models = [config["model"], "mistralai/mixtral-8x7b-instruct"]  # Updated fallback model
+                models = [config["model"], "mistralai/mixtral-8x7b-instruct"]  
                 for model in models:
                     try:
                         response = client.chat.completions.create(
@@ -56,10 +49,10 @@ def api_call(config, prompt, retries=3, timeout=10):
                         words = text.split()
                         if len(words) > 50:
                             words = words[:50]
-                            text = " ".join(words) + "..."  # Add ellipsis for truncation
+                            text = " ".join(words) + "..." 
                         else:
                             text = " ".join(words)
-                        time.sleep(2)  # Increased delay to avoid rate limits
+                        time.sleep(2)  
                         return text
                     except Exception as e:
                         error_details = f"Model {model} failed: {str(e)}"
@@ -84,7 +77,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                 words = text.split()
                 if len(words) > 50:
                     words = words[:50]
-                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                    text = " ".join(words) + "..." 
                 else:
                     text = " ".join(words)
                 return text
@@ -107,7 +100,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                 words = text.split()
                 if len(words) > 50:
                     words = words[:50]
-                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                    text = " ".join(words) + "..."  
                 else:
                     text = " ".join(words)
                 return text
@@ -122,7 +115,7 @@ def api_call(config, prompt, retries=3, timeout=10):
                 words = text.split()
                 if len(words) > 50:
                     words = words[:50]
-                    text = " ".join(words) + "..."  # Add ellipsis for truncation
+                    text = " ".join(words) + "..."  
                 else:
                     text = " ".join(words)
                 return text
@@ -132,11 +125,10 @@ def api_call(config, prompt, retries=3, timeout=10):
             if attempt == retries - 1:
                 error_details_words = error_details.split()[:50]
                 return f"Error: {' '.join(error_details_words)}..."
-            time.sleep(2 ** attempt)  # Exponential backoff
+            time.sleep(2 ** attempt)  
     error_details_words = error_details.split()[:50]
     return f"Error: {config['type'].capitalize()} API failed after {retries} retries - {' '.join(error_details_words)}..."
 
-# Query Classifier
 class QueryClassifier:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -188,7 +180,6 @@ class QueryClassifier:
         response_cache[cache_key] = result
         return result
 
-# Convergence Checker
 class ConvergenceChecker:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -210,7 +201,7 @@ class ConvergenceChecker:
             reasoning = f"Convergence check failed: {response}. Defaulting to Continue."
         else:
             lines = response.strip().split('\n')
-            last_line = lines[-1].strip() if lines else ""  # Use last line for decision
+            last_line = lines[-1].strip() if lines else ""  
             if last_line in ["Converged", "Continue"]:
                 decision = last_line
             else:
@@ -224,7 +215,6 @@ class ConvergenceChecker:
             "reasoning": reasoning
         }
 
-# Generator Agent
 class Generator:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -255,7 +245,6 @@ class Generator:
         response_cache[cache_key] = result
         return result
 
-# Critic Agent
 class Critic:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -275,7 +264,6 @@ class Critic:
             "combined": f"GrokCloud Critique: {critique}"
         }
 
-# Validator Agent
 class Validator:
     def __init__(self):
         self.prompt_template = PromptTemplate(
@@ -298,7 +286,6 @@ class Validator:
             "combined": f"OpenRouter (LLaMA) Validation: {openrouter_validation}\nCohere Validation: {cohere_validation}"
         }
 
-# Orchestrator
 class Orchestrator:
     def __init__(self):
         self.generator = Generator()
@@ -332,7 +319,7 @@ class Orchestrator:
             prompt = f"Provide a clear and concise answer to: {query}"
             cache_key = f"non_debatable:{query}"
             if cache_key in response_cache:
-                answer = response_cache[cache_key]  # Fixed: Use response_cache[cache_key]
+                answer = response_cache[cache_key]  
             else:
                 answer = api_call({"type": "grokcloud"}, prompt)
                 response_cache[cache_key] = answer
@@ -349,7 +336,6 @@ class Orchestrator:
                 "reasoning_log": reasoning_log
             }
 
-        # Debatable: Proceed with debate
         gen_output = self.generator.generate_response(query)
         current_response = gen_output["combined"]
         reasoning_log.append({"step": "Initial Generation", "response": current_response})
@@ -398,7 +384,7 @@ class Orchestrator:
         grokcloud_response = api_call({"type": "grokcloud"}, grokcloud_prompt)
         reasoning_log.append({
             "step": "GrokCloud Selection",
-            "grokcloud_response": grokcloud_response.strip()  # Ensure clean response
+            "grokcloud_response": grokcloud_response.strip() 
         })
 
         chosen_validation = validation_output["cohere_validation"]
@@ -421,7 +407,6 @@ class Orchestrator:
             "reasoning_log": reasoning_log
         }
 
-# Interactive user input
 if __name__ == "__main__":
     orchestrator = Orchestrator()
     
